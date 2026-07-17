@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Bey Link · 我的陀螺收藏圈</title>
+
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0A0B0F" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Bey Link" />
+<meta name="mobile-web-app-capable" content="yes" />
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rubik:wght@400;500&family=JetBrains+Mono:wght@500&display=swap" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #05060A; }
+  @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+  * { -webkit-tap-highlight-color: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ---------- storage helpers (localStorage, since this is a standalone hosted app) ----------
+const COLLECTION_KEY = "beylink:tops";
+const BATTLES_KEY = "beylink:battles";
+const FRIENDS_KEY = "beylink:friends";
+
+function loadKey(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+function saveKey(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.error("storage save failed", key, e);
+  }
+}
+
+// ---------- misc helpers ----------
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+function resizeImage(file, maxDim = 480, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height && width > maxDim) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else if (height > maxDim) {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+const ROTATIONS = ["左旋", "右旋", "雙向"];
+const TYPES = ["攻擊", "防禦", "持久", "平衡"];
+
+const emptyTop = () => ({
+  id: uid(),
+  name: "",
+  series: "",
+  photo: null,
+  rotation: "右旋",
+  type: "攻擊",
+  note: "",
+  stars: 3,
+  blade: { name: "", note: "" },
+  ratchet: { name: "", note: "" },
+  bit: { name: "", note: "" },
+  launcher: { name: "", note: "" },
+  createdAt: new Date().toISOString(),
+});
+
+// share payload excludes photo (too big for a QR code)
+function buildShareCode(top) {
+  const { photo, id, createdAt, ...rest } = top;
+  const payload = { v: 1, kind: "beytop", ...rest, sharedFrom: id };
+  return btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+}
+function parseShareCode(code) {
+  const data = JSON.parse(decodeURIComponent(escape(atob(code.trim()))));
+  if (data.kind !== "beytop") throw new Error("這不是一張陀螺收藏卡的分享代碼");
+  return data;
+}
+
+// ---------- simple emoji-based icons (no external icon library needed) ----------
+const mkIcon = (glyph) => ({ size = 20, color = "currentColor", style = {} }) => (
+  <span style={{ fontSize: size, color, lineHeight: 1, display: "inline-block", ...style }}>{glyph}</span>
+);
+const Plus = mkIcon("＋");
+const Layers = mkIcon("🗂️");
+const Swords = mkIcon("⚔️");
+const QrCode = mkIcon("🔳");
+const HomeIcon = mkIcon("🏠");
+const ChevronLeft = mkIcon("‹");
+const Camera = mkIcon("📷");
+const Trash2 = mkIcon("🗑️");
+const Pencil = mkIcon("✏️");
+const Copy = mkIcon("📋");
+const Check = mkIcon("✅");
+const Upload = mkIcon("📤");
+const Download = mkIcon("📥");
+const Users = mkIcon("👥");
+const ScanLine = mkIcon("📡");
+const XIcon = mkIcon("✕");
+
+// ---------- spinning disc (signature element) ----------
+function SpinDisc({ size = 160, speed = 1, photo = null }) {
+  const dur = Math.max(0.6, 2.6 / speed);
+  return (
+    <div style={{ width: size, height: size }} className="relative flex items-center justify-center">
+      <div className="absolute inset-0 rounded-full" style={{ boxShadow: "0 0 40px 6px rgba(47,216,255,0.35), 0 0 90px 20px rgba(47,216,255,0.12)" }} />
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="absolute rounded-full border" style={{ inset: i * 14, borderColor: "rgba(47,216,255,0.25)", borderWidth: 1, animation: `spin ${dur * (1 + i * 0.4)}s linear infinite ${i % 2 ? "reverse" : ""}` }} />
+      ))}
+      <div className="relative rounded-full flex items-center justify-center overflow-hidden" style={{ width: size * 0.62, height: size * 0.62, background: photo ? `center/cover no-repeat url(${photo})` : "radial-gradient(circle at 35% 30%, #3fe3ff, #0b7fb0 55%, #072a3d 100%)", animation: `spin ${dur}s linear infinite`, border: "2px solid rgba(232,236,244,0.25)" }}>
+        {!photo && <span style={{ fontSize: size * 0.26, filter: "drop-shadow(0 0 6px #2FD8FF)" }}>🌀</span>}
+      </div>
+    </div>
+  );
+}
+
+function Stars({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 4 }}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button key={n} type="button" onClick={() => onChange && onChange(n)} style={{ background: "none", border: "none", padding: 0, cursor: onChange ? "pointer" : "default" }}>
+          <span style={{ fontSize: 18, color: n <= value ? "#FFC24B" : "#4b4f5c" }}>{n <= value ? "★" : "☆"}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function StatTile({ label, value, accent }) {
+  return (
+    <div className="rounded-xl px-4 py-3 flex-1" style={{ minWidth: 110, background: "#15171F", border: "1px solid #22252e" }}>
+      <div className="text-[11px] tracking-wide" style={{ color: "#8a90a3", fontFamily: "Rubik, sans-serif" }}>{label}</div>
+      <div className="text-2xl mt-1" style={{ fontFamily: "'JetBrains Mono', monospace", color: accent || "#E8ECF4" }}>{value}</div>
+    </div>
+  );
+}
+
+function NavButton({ icon: Icon, label, onClick, active }) {
+  return (
+    <button onClick={onClick} className="flex flex-col items-center gap-1 flex-1 py-2" style={{ color: active ? "#2FD8FF" : "#7d8296" }}>
+      <Icon size={20} />
+      <span style={{ fontSize: 11, fontFamily: "Rubik, sans-serif" }}>{label}</span>
+    </button>
+  );
+}
+
+function TopCard({ top, onClick }) {
+  return (
+    <button onClick={onClick} className="text-left rounded-2xl overflow-hidden flex flex-col" style={{ background: "#15171F", border: "1px solid #22252e" }}>
+      <div className="w-full aspect-square flex items-center justify-center" style={{ background: top.photo ? `center/cover no-repeat url(${top.photo})` : "radial-gradient(circle at 35% 30%, #1c3b4d, #0b1620)" }}>
+        {!top.photo && <span style={{ fontSize: 34 }}>🌀</span>}
+      </div>
+      <div className="p-2.5">
+        <div className="truncate" style={{ fontFamily: "Orbitron, sans-serif", fontSize: 13, color: "#E8ECF4" }}>{top.name || "未命名陀螺"}</div>
+        <div className="text-[11px] mt-0.5" style={{ color: "#8a90a3" }}>{top.series || "—"}</div>
+        <div className="mt-1.5"><Stars value={top.stars} /></div>
+      </div>
+    </button>
+  );
+}
+
+function HomeScreen({ tops, battles, friends, go }) {
+  const wins = battles.filter((b) => b.result === "win").length;
+  return (
+    <div className="flex flex-col gap-6 px-4 pt-6 pb-4">
+      <div className="flex flex-col items-center">
+        <div style={{ fontFamily: "Orbitron, sans-serif", color: "#2FD8FF", fontSize: 13, letterSpacing: 3 }}>BEY LINK</div>
+        <div style={{ fontFamily: "Rubik, sans-serif", color: "#8a90a3", fontSize: 12, marginTop: 2 }}>我的陀螺收藏圈</div>
+        <div className="mt-4"><SpinDisc size={172} speed={0.7 + Math.min(tops.length, 20) * 0.06} photo={tops[0]?.photo} /></div>
+      </div>
+      <div className="flex gap-2 flex-wrap">
+        <StatTile label="收藏數量" value={tops.length} accent="#2FD8FF" />
+        <StatTile label="最愛陀螺" value={tops.filter((t) => t.stars >= 4).length} accent="#FFC24B" />
+        <StatTile label="對戰紀錄" value={battles.length} />
+        <StatTile label="朋友收藏" value={friends.length} />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <ActionTile icon={Layers} label="我的收藏" onClick={() => go("collection")} />
+        <ActionTile icon={Plus} label="新增陀螺" onClick={() => go("add")} />
+        <ActionTile icon={Swords} label="對戰紀錄" onClick={() => go("battles")} />
+        <ActionTile icon={QrCode} label="分享 / 掃描" onClick={() => go("share")} />
+      </div>
+      {wins > 0 && (
+        <div className="text-center text-[12px]" style={{ color: "#6f7488", fontFamily: "Rubik, sans-serif" }}>
+          目前戰績 {wins} 勝 · 勝率 {Math.round((wins / battles.length) * 100)}%
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActionTile({ icon: Icon, label, onClick }) {
+  return (
+    <button onClick={onClick} className="rounded-2xl py-5 flex flex-col items-center gap-2" style={{ background: "#15171F", border: "1px solid #22252e" }}>
+      <Icon size={22} color="#2FD8FF" />
+      <span style={{ fontFamily: "Rubik, sans-serif", fontSize: 13, color: "#E8ECF4" }}>{label}</span>
+    </button>
+  );
+}
+
+function Header({ title, onBack, right }) {
+  return (
+    <div className="flex items-center justify-between px-4 pt-5 pb-3">
+      <button onClick={onBack} className="p-1 -ml-1" style={{ color: "#2FD8FF" }}><ChevronLeft size={22} /></button>
+      <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: 14, color: "#E8ECF4" }}>{title}</div>
+      <div style={{ width: 22 }}>{right}</div>
+    </div>
+  );
+}
+
+function CollectionScreen({ tops, go, openTop }) {
+  return (
+    <div className="pb-6">
+      <Header title="我的收藏" onBack={() => go("home")} />
+      {tops.length === 0 ? (
+        <EmptyState text="還沒有收藏任何陀螺" sub="點右下角新增你的第一顆" />
+      ) : (
+        <div className="grid grid-cols-2 gap-3 px-4">
+          {tops.map((t) => (<TopCard key={t.id} top={t} onClick={() => openTop(t.id)} />))}
+        </div>
+      )}
+      <button onClick={() => go("add")} className="fixed bottom-20 right-5 rounded-full p-4" style={{ background: "#2FD8FF", boxShadow: "0 0 20px rgba(47,216,255,0.5)" }}>
+        <Plus color="#0A0B0F" size={22} />
+      </button>
+    </div>
+  );
+}
+
+function EmptyState({ text, sub }) {
+  return (
+    <div className="flex flex-col items-center py-16 gap-2 px-6 text-center">
+      <div style={{ fontSize: 40, opacity: 0.5 }}>🌀</div>
+      <div style={{ color: "#E8ECF4", fontFamily: "Rubik, sans-serif", fontSize: 14 }}>{text}</div>
+      {sub && <div style={{ color: "#6f7488", fontSize: 12 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function FieldLabel({ children }) {
+  return <div style={{ fontFamily: "Rubik, sans-serif", fontSize: 12, color: "#8a90a3", marginBottom: 6 }}>{children}</div>;
+}
+const inputStyle = { width: "100%", background: "#0F1116", border: "1px solid #262a35", borderRadius: 10, padding: "10px 12px", color: "#E8ECF4", fontFamily: "Rubik, sans-serif", fontSize: 14, outline: "none", boxSizing: "border-box" };
+
+function SegButtons({ options, value, onChange }) {
+  return (
+    <div className="flex gap-2 flex-wrap">
+      {options.map((o) => (
+        <button key={o} type="button" onClick={() => onChange(o)} className="px-3 py-1.5 rounded-full text-[13px]" style={{ background: value === o ? "rgba(47,216,255,0.15)" : "#0F1116", border: `1px solid ${value === o ? "#2FD8FF" : "#262a35"}`, color: value === o ? "#2FD8FF" : "#8a90a3", fontFamily: "Rubik, sans-serif" }}>
+          {o}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function AccessoryField({ label, value, onChange }) {
+  return (
+    <div className="mb-3">
+      <FieldLabel>{label}</FieldLabel>
+      <input style={{ ...inputStyle, marginBottom: 6 }} placeholder={`${label} 名稱`} value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} />
+      <input style={inputStyle} placeholder="備註（選填）" value={value.note} onChange={(e) => onChange({ ...value, note: e.target.value })} />
+    </div>
+  );
+}
+
+function AddEditScreen({ initial, onSave, onCancel, onDelete }) {
+  const [top, setTop] = useState(initial || emptyTop());
+  const fileRef = useRef(null);
+  const isEdit = !!initial;
+
+  const handlePhoto = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImage(file);
+      setTop((t) => ({ ...t, photo: dataUrl }));
+    } catch (err) { console.error(err); }
+  };
+
+  const canSave = top.name.trim().length > 0;
+
+  return (
+    <div className="pb-24 px-4">
+      <Header title={isEdit ? "編輯陀螺" : "新增陀螺"} onBack={onCancel} />
+      <div className="flex justify-center mb-5">
+        <button onClick={() => fileRef.current?.click()} className="relative rounded-2xl overflow-hidden flex items-center justify-center" style={{ width: 140, height: 140, background: top.photo ? `center/cover no-repeat url(${top.photo})` : "#15171F", border: "1px dashed #2FD8FF" }}>
+          {!top.photo && (
+            <div className="flex flex-col items-center gap-1" style={{ color: "#2FD8FF" }}>
+              <Camera size={22} />
+              <span style={{ fontSize: 11, fontFamily: "Rubik, sans-serif" }}>新增照片</span>
+            </div>
+          )}
+        </button>
+        <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={handlePhoto} />
+      </div>
+
+      <FieldLabel>陀螺名稱 *</FieldLabel>
+      <input style={{ ...inputStyle, marginBottom: 14 }} placeholder="例如：Phoenix Wing" value={top.name} onChange={(e) => setTop({ ...top, name: e.target.value })} />
+
+      <FieldLabel>系列</FieldLabel>
+      <input style={{ ...inputStyle, marginBottom: 14 }} placeholder="例如：BX" value={top.series} onChange={(e) => setTop({ ...top, series: e.target.value })} />
+
+      <FieldLabel>左右旋</FieldLabel>
+      <div className="mb-4"><SegButtons options={ROTATIONS} value={top.rotation} onChange={(v) => setTop({ ...top, rotation: v })} /></div>
+
+      <FieldLabel>類型</FieldLabel>
+      <div className="mb-4"><SegButtons options={TYPES} value={top.type} onChange={(v) => setTop({ ...top, type: v })} /></div>
+
+      <FieldLabel>星級</FieldLabel>
+      <div className="mb-4"><Stars value={top.stars} onChange={(v) => setTop({ ...top, stars: v })} /></div>
+
+      <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: 12, color: "#2FD8FF", margin: "18px 0 10px" }}>配件</div>
+      <AccessoryField label="Blade" value={top.blade} onChange={(v) => setTop({ ...top, blade: v })} />
+      <AccessoryField label="Ratchet" value={top.ratchet} onChange={(v) => setTop({ ...top, ratchet: v })} />
+      <AccessoryField label="Bit" value={top.bit} onChange={(v) => setTop({ ...top, bit: v })} />
+      <AccessoryField label="Launcher" value={top.launcher} onChange={(v) => setTop({ ...top, launcher: v })} />
+
+      <FieldLabel>心得備註</FieldLabel>
+      <textarea style={{ ...inputStyle, minHeight: 70, marginBottom: 20 }} placeholder="例如：爸爸送我的生日禮物" value={top.note} onChange={(e) => setTop({ ...top, note: e.target.value })} />
+
+      <div className="flex gap-3">
+        <button disabled={!canSave} onClick={() => onSave(top)} className="flex-1 rounded-xl py-3 font-medium" style={{ background: canSave ? "#2FD8FF" : "#22252e", color: canSave ? "#0A0B0F" : "#6f7488", fontFamily: "Rubik, sans-serif" }}>
+          {isEdit ? "儲存變更" : "加入收藏"}
+        </button>
+        {isEdit && (
+          <button onClick={() => onDelete(top.id)} className="rounded-xl px-4 py-3" style={{ background: "#2a1518", color: "#ff6b6b" }}>
+            <Trash2 size={18} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CardRow({ label, value }) {
+  if (!value) return null;
+  return (
+    <div className="flex justify-between text-[13px] py-1" style={{ fontFamily: "Rubik, sans-serif" }}>
+      <span style={{ color: "#6f7488" }}>{label}</span>
+      <span style={{ color: "#E8ECF4" }}>{value}</span>
+    </div>
+  );
+}
+
+function TopDetailScreen({ top, isFriend, go, onEdit, onCloneFriend }) {
+  const [copied, setCopied] = useState(false);
+  const shareCode = buildShareCode(top);
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(shareCode)}`;
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(shareCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) { console.error(e); }
+  };
+
+  return (
+    <div className="pb-8 px-4">
+      <Header title="收藏卡" onBack={() => go(isFriend ? "friends" : "collection")} right={!isFriend && (<button onClick={() => onEdit(top.id)}><Pencil size={18} color="#2FD8FF" /></button>)} />
+      <div className="rounded-2xl overflow-hidden mx-auto" style={{ background: "#15171F", border: "1px solid #22252e", maxWidth: 340 }}>
+        <div className="w-full aspect-[4/3] flex items-center justify-center" style={{ background: top.photo ? `center/cover no-repeat url(${top.photo})` : "radial-gradient(circle at 35% 30%, #1c3b4d, #0b1620)" }}>
+          {!top.photo && <span style={{ fontSize: 44 }}>🌀</span>}
+        </div>
+        <div className="p-4">
+          <div className="flex items-center justify-between">
+            <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: 16, color: "#E8ECF4" }}>{top.name}</div>
+            <Stars value={top.stars} />
+          </div>
+          {isFriend && <div style={{ fontSize: 11, color: "#2FD8FF", marginTop: 2 }}>來自朋友的收藏卡</div>}
+          <div className="mt-3 pt-3" style={{ borderTop: "1px solid #22252e" }}>
+            <CardRow label="系列" value={top.series} />
+            <CardRow label="旋轉" value={top.rotation} />
+            <CardRow label="類型" value={top.type} />
+            <CardRow label="Blade" value={top.blade?.name} />
+            <CardRow label="Ratchet" value={top.ratchet?.name} />
+            <CardRow label="Bit" value={top.bit?.name} />
+            <CardRow label="Launcher" value={top.launcher?.name} />
+          </div>
+          {top.note && (
+            <div className="mt-3 pt-3" style={{ borderTop: "1px solid #22252e" }}>
+              <div style={{ fontSize: 11, color: "#8a90a3", marginBottom: 4 }}>⭐ 我的心得</div>
+              <div style={{ fontSize: 13, color: "#E8ECF4", fontFamily: "Rubik, sans-serif" }}>{top.note}</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {isFriend ? (
+        <button onClick={() => onCloneFriend(top)} className="w-full mt-6 rounded-xl py-3" style={{ background: "#2FD8FF", color: "#0A0B0F", fontFamily: "Rubik, sans-serif" }}>
+          複製建立我的版本
+        </button>
+      ) : (
+        <div className="flex flex-col items-center mt-6 gap-3">
+          <img src={qrUrl} alt="分享 QR" width={180} height={180} style={{ borderRadius: 12 }} />
+          <div style={{ fontSize: 11, color: "#6f7488", textAlign: "center" }}>
+            請朋友在「分享 / 掃描」頁貼上下方代碼即可匯入<br />（為了讓 QR Code 不會太複雜，分享卡不含照片）
+          </div>
+          <button onClick={copyCode} className="flex items-center gap-2 px-4 py-2 rounded-full text-[13px]" style={{ background: "#15171F", border: "1px solid #2FD8FF", color: "#2FD8FF" }}>
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? "已複製" : "複製分享代碼"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BattlesScreen({ tops, battles, go, addBattle, deleteBattle }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ myTopId: tops[0]?.id || "", opponent: "", result: "win", note: "", date: new Date().toISOString().slice(0, 10) });
+
+  const wins = battles.filter((b) => b.result === "win").length;
+  const losses = battles.filter((b) => b.result === "loss").length;
+  const rate = battles.length ? Math.round((wins / battles.length) * 100) : 0;
+
+  const submit = () => {
+    if (!form.myTopId) return;
+    addBattle({ ...form, id: uid() });
+    setShowForm(false);
+    setForm({ ...form, opponent: "", note: "" });
+  };
+
+  return (
+    <div className="pb-8 px-4">
+      <Header title="對戰紀錄" onBack={() => go("home")} />
+      <div className="flex gap-2 mb-4">
+        <StatTile label="勝場" value={wins} accent="#FFC24B" />
+        <StatTile label="敗場" value={losses} />
+        <StatTile label="勝率" value={`${rate}%`} accent="#2FD8FF" />
+      </div>
+
+      {!showForm ? (
+        <button onClick={() => setShowForm(true)} disabled={tops.length === 0} className="w-full rounded-xl py-3 mb-5" style={{ background: tops.length ? "#2FD8FF" : "#22252e", color: tops.length ? "#0A0B0F" : "#6f7488", fontFamily: "Rubik, sans-serif" }}>
+          {tops.length ? "新增對戰紀錄" : "請先新增陀螺"}
+        </button>
+      ) : (
+        <div className="rounded-xl p-4 mb-5" style={{ background: "#15171F", border: "1px solid #22252e" }}>
+          <FieldLabel>我的陀螺</FieldLabel>
+          <select style={{ ...inputStyle, marginBottom: 12 }} value={form.myTopId} onChange={(e) => setForm({ ...form, myTopId: e.target.value })}>
+            {tops.map((t) => (<option key={t.id} value={t.id}>{t.name}</option>))}
+          </select>
+          <FieldLabel>對手陀螺</FieldLabel>
+          <input style={{ ...inputStyle, marginBottom: 12 }} placeholder="例如：朋友的 Dran Sword" value={form.opponent} onChange={(e) => setForm({ ...form, opponent: e.target.value })} />
+          <FieldLabel>日期</FieldLabel>
+          <input type="date" style={{ ...inputStyle, marginBottom: 12 }} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+          <FieldLabel>結果</FieldLabel>
+          <div className="mb-3"><SegButtons options={["win", "loss", "draw"]} value={form.result} onChange={(v) => setForm({ ...form, result: v })} /></div>
+          <FieldLabel>備註</FieldLabel>
+          <input style={{ ...inputStyle, marginBottom: 14 }} placeholder="例如：第三回合 KO" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+          <div className="flex gap-2">
+            <button onClick={submit} className="flex-1 rounded-xl py-2.5" style={{ background: "#2FD8FF", color: "#0A0B0F", fontFamily: "Rubik, sans-serif" }}>儲存</button>
+            <button onClick={() => setShowForm(false)} className="rounded-xl px-4 py-2.5" style={{ background: "#22252e", color: "#8a90a3" }}>取消</button>
+          </div>
+        </div>
+      )}
+
+      {battles.length === 0 ? (
+        <EmptyState text="還沒有對戰紀錄" />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {[...battles].reverse().map((b) => {
+            const myTop = tops.find((t) => t.id === b.myTopId);
+            const resultLabel = b.result === "win" ? "🏆 勝利" : b.result === "loss" ? "❌ 失敗" : "🤝 平手";
+            const resultColor = b.result === "win" ? "#FFC24B" : b.result === "loss" ? "#ff6b6b" : "#8a90a3";
+            return (
+              <div key={b.id} className="rounded-xl p-3 flex items-center justify-between" style={{ background: "#15171F", border: "1px solid #22252e" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#E8ECF4", fontFamily: "Rubik, sans-serif" }}>{myTop?.name || "（已刪除）"} vs {b.opponent || "對手"}</div>
+                  <div style={{ fontSize: 11, color: "#6f7488" }}>{b.date} {b.note ? `· ${b.note}` : ""}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span style={{ fontSize: 12, color: resultColor, fontFamily: "Rubik, sans-serif" }}>{resultLabel}</span>
+                  <button onClick={() => deleteBattle(b.id)}><Trash2 size={14} color="#6f7488" /></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FriendsScreen({ friends, go, openFriendTop, removeFriend }) {
+  return (
+    <div className="pb-8 px-4">
+      <Header title="朋友收藏" onBack={() => go("share")} />
+      {friends.length === 0 ? (
+        <EmptyState text="還沒有收藏朋友的陀螺卡" sub="到「分享 / 掃描」頁貼上朋友的分享代碼" />
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          {friends.map((t) => (
+            <div key={t.id} className="relative">
+              <TopCard top={t} onClick={() => openFriendTop(t.id)} />
+              <button onClick={(e) => { e.stopPropagation(); removeFriend(t.id); }} className="absolute top-1.5 right-1.5 rounded-full p-1" style={{ background: "rgba(10,11,15,0.7)" }}>
+                <XIcon size={12} color="#ff6b6b" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShareScreen({ go, importFriendTop, tops, battles, friends, restoreAll }) {
+  const [code, setCode] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [error, setError] = useState("");
+  const [showBackup, setShowBackup] = useState(false);
+  const [backupText, setBackupText] = useState("");
+  const [restoreText, setRestoreText] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const parse = () => {
+    setError("");
+    try {
+      const data = parseShareCode(code);
+      setPreview(data);
+    } catch (e) {
+      setError("代碼無法解析，請確認是否貼上完整代碼");
+      setPreview(null);
+    }
+  };
+
+  const confirmImport = () => {
+    importFriendTop(preview);
+    setPreview(null);
+    setCode("");
+    go("friends");
+  };
+
+  const exportBackup = () => {
+    setBackupText(JSON.stringify({ tops, battles, friends }, null, 2));
+    setShowBackup(true);
+  };
+
+  const doRestore = () => {
+    try {
+      const data = JSON.parse(restoreText);
+      restoreAll(data);
+      setMsg("已還原備份！");
+      setTimeout(() => setMsg(""), 2000);
+    } catch (e) { setMsg("備份格式錯誤"); }
+  };
+
+  return (
+    <div className="pb-8 px-4">
+      <Header title="分享 / 掃描" onBack={() => go("home")} />
+      <button onClick={() => go("friends")} className="w-full flex items-center justify-between rounded-xl p-4 mb-5" style={{ background: "#15171F", border: "1px solid #22252e" }}>
+        <div className="flex items-center gap-2">
+          <Users size={18} color="#2FD8FF" />
+          <span style={{ fontFamily: "Rubik, sans-serif", fontSize: 14, color: "#E8ECF4" }}>朋友收藏（{friends.length}）</span>
+        </div>
+        <ChevronLeft size={16} color="#6f7488" style={{ transform: "rotate(180deg)" }} />
+      </button>
+
+      <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: 12, color: "#2FD8FF", marginBottom: 10 }}>
+        <ScanLine size={14} style={{ marginRight: 6, verticalAlign: -2 }} />匯入朋友的分享代碼
+      </div>
+      <textarea style={{ ...inputStyle, minHeight: 70, marginBottom: 10 }} placeholder="請貼上朋友給你的分享代碼" value={code} onChange={(e) => setCode(e.target.value)} />
+      <button onClick={parse} className="w-full rounded-xl py-2.5 mb-4" style={{ background: "#2FD8FF", color: "#0A0B0F", fontFamily: "Rubik, sans-serif" }}>解析代碼</button>
+      {error && <div style={{ color: "#ff6b6b", fontSize: 12, marginBottom: 10 }}>{error}</div>}
+
+      {preview && (
+        <div className="rounded-xl p-3 mb-6" style={{ background: "#15171F", border: "1px solid #2FD8FF" }}>
+          <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: 14, color: "#E8ECF4" }}>{preview.name}</div>
+          <div style={{ fontSize: 12, color: "#8a90a3", marginTop: 2 }}>{preview.series} · {preview.type}</div>
+          <button onClick={confirmImport} className="w-full mt-3 rounded-lg py-2" style={{ background: "#2FD8FF", color: "#0A0B0F", fontFamily: "Rubik, sans-serif", fontSize: 13 }}>加入朋友收藏</button>
+        </div>
+      )}
+
+      <div style={{ borderTop: "1px solid #22252e", paddingTop: 20 }}>
+        <div style={{ fontFamily: "Orbitron, sans-serif", fontSize: 12, color: "#2FD8FF", marginBottom: 10 }}>備份</div>
+        <div className="flex gap-2 mb-4">
+          <button onClick={exportBackup} className="flex-1 rounded-xl py-2.5 flex items-center justify-center gap-2" style={{ background: "#15171F", border: "1px solid #22252e", color: "#E8ECF4", fontFamily: "Rubik, sans-serif", fontSize: 13 }}>
+            <Download size={15} /> 匯出備份
+          </button>
+        </div>
+        {showBackup && (<textarea readOnly style={{ ...inputStyle, minHeight: 100, marginBottom: 14, fontSize: 11 }} value={backupText} onFocus={(e) => e.target.select()} />)}
+        <FieldLabel>匯入備份（貼上先前匯出的內容）</FieldLabel>
+        <textarea style={{ ...inputStyle, minHeight: 70, marginBottom: 10 }} value={restoreText} onChange={(e) => setRestoreText(e.target.value)} />
+        <button onClick={doRestore} className="w-full rounded-xl py-2.5 flex items-center justify-center gap-2" style={{ background: "#15171F", border: "1px solid #22252e", color: "#E8ECF4", fontFamily: "Rubik, sans-serif", fontSize: 13 }}>
+          <Upload size={15} /> 匯入備份
+        </button>
+        {msg && <div style={{ color: "#2FD8FF", fontSize: 12, marginTop: 8 }}>{msg}</div>}
+      </div>
+    </div>
+  );
+}
+
+function BeyLinkApp() {
+  const [view, setView] = useState("home");
+  const [tops, setTops] = useState(() => loadKey(COLLECTION_KEY, []));
+  const [battles, setBattles] = useState(() => loadKey(BATTLES_KEY, []));
+  const [friends, setFriends] = useState(() => loadKey(FRIENDS_KEY, []));
+  const [activeTopId, setActiveTopId] = useState(null);
+
+  useEffect(() => { saveKey(COLLECTION_KEY, tops); }, [tops]);
+  useEffect(() => { saveKey(BATTLES_KEY, battles); }, [battles]);
+  useEffect(() => { saveKey(FRIENDS_KEY, friends); }, [friends]);
+
+  const go = useCallback((v) => setView(v), []);
+  const openTop = (id) => { setActiveTopId(id); setView("topDetail"); };
+  const openFriendTop = (id) => { setActiveTopId(id); setView("friendTopDetail"); };
+
+  const saveTop = (top) => {
+    setTops((prev) => {
+      const exists = prev.some((t) => t.id === top.id);
+      return exists ? prev.map((t) => (t.id === top.id ? top : t)) : [...prev, top];
+    });
+    setActiveTopId(top.id);
+    setView("topDetail");
+  };
+  const deleteTop = (id) => { setTops((prev) => prev.filter((t) => t.id !== id)); setView("collection"); };
+  const addBattle = (b) => setBattles((prev) => [...prev, b]);
+  const deleteBattle = (id) => setBattles((prev) => prev.filter((b) => b.id !== id));
+  const importFriendTop = (data) => {
+    const newTop = { ...emptyTop(), ...data, id: uid(), photo: null };
+    setFriends((prev) => [...prev, newTop]);
+  };
+  const removeFriend = (id) => setFriends((prev) => prev.filter((t) => t.id !== id));
+  const cloneFriendTop = (friendTop) => {
+    const cloned = { ...friendTop, id: uid(), createdAt: new Date().toISOString() };
+    setTops((prev) => [...prev, cloned]);
+    setActiveTopId(cloned.id);
+    setView("topDetail");
+  };
+  const restoreAll = (data) => {
+    if (data.tops) setTops(data.tops);
+    if (data.battles) setBattles(data.battles);
+    if (data.friends) setFriends(data.friends);
+  };
+
+  const activeTop = tops.find((t) => t.id === activeTopId);
+  const activeFriendTop = friends.find((t) => t.id === activeTopId);
+
+  let screen;
+  if (view === "home") {
+    screen = <HomeScreen tops={tops} battles={battles} friends={friends} go={go} />;
+  } else if (view === "collection") {
+    screen = <CollectionScreen tops={tops} go={go} openTop={openTop} />;
+  } else if (view === "add") {
+    screen = <AddEditScreen onSave={saveTop} onCancel={() => go("collection")} />;
+  } else if (view === "editTop" && activeTop) {
+    screen = <AddEditScreen initial={activeTop} onSave={saveTop} onCancel={() => go("topDetail")} onDelete={deleteTop} />;
+  } else if (view === "topDetail" && activeTop) {
+    screen = <TopDetailScreen top={activeTop} isFriend={false} go={go} onEdit={() => go("editTop")} />;
+  } else if (view === "friendTopDetail" && activeFriendTop) {
+    screen = <TopDetailScreen top={activeFriendTop} isFriend={true} go={go} onCloneFriend={cloneFriendTop} />;
+  } else if (view === "battles") {
+    screen = <BattlesScreen tops={tops} battles={battles} go={go} addBattle={addBattle} deleteBattle={deleteBattle} />;
+  } else if (view === "share") {
+    screen = <ShareScreen go={go} importFriendTop={importFriendTop} tops={tops} battles={battles} friends={friends} restoreAll={restoreAll} />;
+  } else if (view === "friends") {
+    screen = <FriendsScreen friends={friends} go={go} openFriendTop={openFriendTop} removeFriend={removeFriend} />;
+  } else {
+    screen = <HomeScreen tops={tops} battles={battles} friends={friends} go={go} />;
+  }
+
+  return (
+    <div className="w-full flex justify-center" style={{ background: "#05060A", minHeight: "100vh", fontFamily: "Rubik, sans-serif" }}>
+      <div className="w-full relative flex flex-col" style={{ maxWidth: 420, minHeight: "100vh", background: "#0A0B0F", color: "#E8ECF4" }}>
+        <div className="flex-1 overflow-y-auto">{screen}</div>
+        <div className="flex sticky bottom-0" style={{ background: "rgba(10,11,15,0.92)", borderTop: "1px solid #1c1f27", backdropFilter: "blur(6px)" }}>
+          <NavButton icon={HomeIcon} label="首頁" active={view === "home"} onClick={() => go("home")} />
+          <NavButton icon={Layers} label="收藏" active={view === "collection"} onClick={() => go("collection")} />
+          <NavButton icon={Plus} label="新增" active={view === "add"} onClick={() => go("add")} />
+          <NavButton icon={Swords} label="對戰" active={view === "battles"} onClick={() => go("battles")} />
+          <NavButton icon={QrCode} label="分享" active={view === "share" || view === "friends"} onClick={() => go("share")} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<BeyLinkApp />);
+</script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch((e) => console.error("SW register failed", e));
+    });
+  }
+</script>
+</body>
+</html>
